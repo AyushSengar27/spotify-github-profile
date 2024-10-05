@@ -28,13 +28,11 @@ CACHE_TOKEN_INFO = {}
 
 app = Flask(__name__)
 
-
 @functools.lru_cache(maxsize=128)
 def generate_css_bar(num_bar=75):
     css_bar = ""
     left = 1
     for i in range(1, num_bar + 1):
-
         anim = random.randint(350, 500)
         css_bar += (
             ".bar:nth-child({})  {{ left: {}px; animation-duration: {}ms; }}".format(
@@ -42,14 +40,13 @@ def generate_css_bar(num_bar=75):
             )
         )
         left += 4
-
     return css_bar
 
 
 @functools.lru_cache(maxsize=128)
 def load_image(url):
-    resposne = requests.get(url)
-    return resposne.content
+    response = requests.get(url)
+    return response.content
 
 
 def to_img_b64(content):
@@ -61,7 +58,6 @@ def load_image_b64(url):
 
 
 def isLightOrDark(rgbColor=[0, 128, 255], threshold=127.5):
-    # https://stackoverflow.com/a/58270890
     [r, g, b] = rgbColor
     hsp = math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b))
     if hsp > threshold:
@@ -70,7 +66,6 @@ def isLightOrDark(rgbColor=[0, 128, 255], threshold=127.5):
         return "dark"
 
 
-# @functools.lru_cache(maxsize=128)
 def make_svg(
     artist_name,
     song_name,
@@ -134,21 +129,17 @@ def make_svg(
 
 def get_cache_token_info(uid):
     global CACHE_TOKEN_INFO
-
     token_info = CACHE_TOKEN_INFO.get(uid, None)
-
     if type(token_info) == dict:
         current_ts = int(time())
         expired_ts = token_info.get("expired_ts")
         if expired_ts is None or current_ts >= expired_ts:
             return None
-
     return token_info
 
 
 def delete_cache_token_info(uid):
     global CACHE_TOKEN_INFO
-
     if uid in CACHE_TOKEN_INFO:
         del CACHE_TOKEN_INFO[uid]
 
@@ -160,32 +151,30 @@ def get_access_token(uid):
     token_info = get_cache_token_info(uid)
 
     if token_info is None:
-        # Load from firebase
+        # Load from Firebase
         doc_ref = db.collection("users").document(uid)
         doc = doc_ref.get()
 
         if not doc.exists:
-            print("not exist data in firebase: {}".format(uid))
+            print(f"No data exists in Firebase for user: {uid}")
             return None
 
         token_info = doc.to_dict()
-
         CACHE_TOKEN_INFO[uid] = token_info
 
     current_ts = int(time())
     access_token = token_info.get("access_token", None)
 
-    # Check token expired
+    # Check if token is expired
     expired_ts = token_info.get("expired_ts")
     if expired_ts is None or current_ts >= expired_ts:
-        # Refresh token
         refresh_token = token_info["refresh_token"]
 
         new_token = spotify.refresh_token(refresh_token)
 
         # Handle refresh token revoke
         if new_token.get("error") == "invalid_grant":
-            # Delete token in firebase
+            # Delete token in Firebase
             doc_ref = db.collection("users").document(uid)
             doc_ref.delete()
 
@@ -198,9 +187,7 @@ def get_access_token(uid):
             "access_token": new_token["access_token"],
             "expired_ts": expired_ts,
         }
-        doc_ref = db.collection("users").document(uid)
         doc_ref.update(update_data)
-
         access_token = new_token["access_token"]
 
         # Save in memory cache
@@ -212,32 +199,26 @@ def get_access_token(uid):
 def get_song_info(uid, show_offline):
     access_token = get_access_token(uid)
 
-    item = None
-    is_now_playing = False
-
-    # Handle refrest_token revoke or invalid token
     if access_token is None:
-        raise spotify.InvalidTokenError("Invalid Spotify access_token or refresh_token")
+        raise spotify.InvalidTokenError("Invalid Spotify access token or refresh token")
 
-    data = spotify.get_now_playing(access_token)
+    try:
+        data = spotify.get_now_playing(access_token)
+    except Exception as e:
+        print(f"Error fetching now playing data: {str(e)}")
+        return None, False
 
     if data:
         item = data["item"]
-        item["currently_playing_type"] = data["currently_playing_type"]
         is_now_playing = True
     elif show_offline:
         return None, False
     else:
         recent_plays = spotify.get_recently_play(access_token)
-        size_recent_play = len(recent_plays["items"])
-
-        # Handle empty recently play, should offline
-        if size_recent_play == 0:
+        if len(recent_plays["items"]) == 0:
             return None, False
 
-        idx = random.randint(0, size_recent_play - 1)
-        item = recent_plays["items"][idx]["track"]
-        item["currently_playing_type"] = "track"
+        item = recent_plays["items"][random.randint(0, len(recent_plays["items"]) - 1)]["track"]
         is_now_playing = False
 
     return item, is_now_playing
@@ -252,32 +233,25 @@ def catch_all(path):
     theme = request.args.get("theme", default="default")
     bar_color = request.args.get("bar_color", default="53b14f")
     background_color = request.args.get("background_color", default="121212")
-    is_bar_color_from_cover = (
-        request.args.get("bar_color_cover", default="false") == "true"
-    )
+    is_bar_color_from_cover = request.args.get("bar_color_cover", default="false") == "true"
     show_offline = request.args.get("show_offline", default="false") == "true"
     interchange = request.args.get("interchange", default="false") == "true"
 
     # Handle invalid request
     if not uid:
-        return Response("not ok")
+        return Response("Error: 'uid' parameter is missing.", status=400)
 
     try:
         item, is_now_playing = get_song_info(uid, show_offline)
     except spotify.InvalidTokenError as e:
-
-        # Handle invalid token
         return Response(
-            "Error: Invalid Spotify access_token or refresh_token. Possibly the token revoked. Please re-login at https://github.com/kittinan/spotify-github-profile"
+            "Error: Invalid Spotify access token or refresh token. Please re-login.",
+            status=401
         )
 
     if (show_offline and not is_now_playing) or (item is None):
-        if interchange:
-            artist_name = "Currently not playing on Spotify"
-            song_name = "Offline"
-        else:
-            artist_name = "Offline"
-            song_name = "Currently not playing on Spotify"
+        artist_name = "Offline"
+        song_name = "Currently not playing on Spotify" if not interchange else "Currently not playing on Spotify"
         img_b64 = ""
         cover_image = False
         svg = make_svg(
@@ -291,9 +265,7 @@ def catch_all(path):
             show_offline,
             background_color,
         )
-        resp = Response(svg, mimetype="image/svg+xml")
-        resp.headers["Cache-Control"] = "s-maxage=1"
-        return resp
+        return Response(svg, mimetype="image/svg+xml")
 
     currently_playing_type = item.get("currently_playing_type", "track")
 
@@ -303,50 +275,25 @@ def catch_all(path):
     img = None
     img_b64 = ""
     if cover_image:
-
-        if currently_playing_type == "track":
-            img = load_image(item["album"]["images"][1]["url"])
-        elif currently_playing_type == "episode":
-            img = load_image(item["images"][1]["url"])
-
+        img = load_image(item["album"]["images"][1]["url"] if currently_playing_type == "track" else item["images"][1]["url"])
         img_b64 = to_img_b64(img)
 
-    # Extract cover image color
     if is_bar_color_from_cover and img:
-
-        is_skip_dark = False
-        if theme in ["default"]:
-            is_skip_dark = True
-
         pil_img = Image.open(io.BytesIO(img))
         colors = colorgram.extract(pil_img, 5)
 
         for color in colors:
-
             rgb = color.rgb
-
-            light_or_dark = isLightOrDark([rgb.r, rgb.g, rgb.b], threshold=80)
-
-            if light_or_dark == "dark" and is_skip_dark:
-                # Skip to use bar in dark color
+            if isLightOrDark([rgb.r, rgb.g, rgb.b], threshold=80) == "dark" and theme in ["default"]:
                 continue
-
-            bar_color = "%02x%02x%02x" % rgb
+            bar_color = "%02x%02x%02x" % (rgb.r, rgb.g, rgb.b)
             break
 
-    # Find artist_name and song_name
-    if currently_playing_type == "track":
-        artist_name = item["artists"][0]["name"].replace("&", "&amp;")
-        song_name = item["name"].replace("&", "&amp;")
-
-    elif currently_playing_type == "episode":
-        artist_name = item["show"]["publisher"].replace("&", "&amp;")
-        song_name = item["name"].replace("&", "&amp;")
+    artist_name = item["artists"][0]["name"].replace("&", "&amp;")
+    song_name = item["name"].replace("&", "&amp;")
 
     if interchange:
-        x = artist_name
-        artist_name = song_name
-        song_name = x
+        artist_name, song_name = song_name, artist_name
 
     svg = make_svg(
         artist_name,
@@ -360,14 +307,9 @@ def catch_all(path):
         background_color,
     )
 
-    resp = Response(svg, mimetype="image/svg+xml")
-    resp.headers["Cache-Control"] = "s-maxage=1"
-
-    print("cache size:", getsizeof(CACHE_TOKEN_INFO))
-
-    return resp
+    return Response(svg, mimetype="image/svg+xml")
 
 
 if __name__ == "__main__":
-
     app.run(debug=True, port=5003)
+
